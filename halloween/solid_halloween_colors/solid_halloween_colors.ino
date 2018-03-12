@@ -7,8 +7,21 @@
 
 
 // LED strip specs + wiring configuration
-// TODO: Consider switching to hardware SPI to speed things up. Color transition times are currently dominated by calls
-// to FastLED.show(), which takes around 2-3 milliseconds
+/**
+ * Each randomFill is NUM_LEDS calls to show(); 60 calls * 2ms = 120ms
+ * Each color transition is 128 steps, each step calling randomFill(); 128 * 120ms = ~15s
+ *
+ * Color -> color transition overhead is (FastLED.show() time) * (LED strip length / # simul. swaps) * (# fade steps)
+ * 2.5ms * 60 * 128
+ *
+ * We could optimize this by:
+ *  1. Reducing the number of times that randomFill calls show() (by switching more than one LED at a time)
+ *  2. Reducing the amount of time show() takes (by using hardware SPI)
+ *  3. Reducing the number of steps in a color transition (by adjusting theta by more than one at a time)
+ *
+ * Those optimizations are in order of preference. Hardware SPI sounds nice, until you think about how we'll need to
+ * control multiple strips at some point.
+ */
 #define LED_TYPE APA102
 #define LED_COLOR_ORDER BGR
 #define NUM_LEDS 60
@@ -27,17 +40,19 @@ CRGB leds[NUM_LEDS];
 #define HALLOWEEN_GREEN_HUE 96
 #define HALLOWEEN_BRIGHTNESS 255
 #define HALLOWEEN_SATURATION 255
+#define COLOR_HOLD_TIME_MS 300000 // five minutes
 CRGB halloween_orange = CHSV(HALLOWEEN_ORANGE_HUE, HALLOWEEN_SATURATION, HALLOWEEN_BRIGHTNESS);
 CRGB halloween_purple = CHSV(HALLOWEEN_PURPLE_HUE, HALLOWEEN_SATURATION, HALLOWEEN_BRIGHTNESS);
 CRGB halloween_green = CHSV(HALLOWEEN_GREEN_HUE, HALLOWEEN_SATURATION, HALLOWEEN_BRIGHTNESS);
 CRGB color_sequence[] = { halloween_orange, halloween_green, halloween_purple };
+size_t color_sequence_len = sizeof(color_sequence) / sizeof(color_sequence[0]);
 
 // Array for occasional shuffling, for use with random-swap color transitions
 uint8_t random_led_indices[NUM_LEDS];
 
 
 /**
- * Initialize everything
+ * Initialize everything.
  */
 void setup() {
     FastLED.setMaxPowerInVoltsAndMilliamps(POWER_SYSTEM_VOLTAGE, POWER_SYSTEM_MAX_CURRENT_MA);
@@ -47,8 +62,6 @@ void setup() {
     for (uint8_t i=0; i<NUM_LEDS; i++) {
         random_led_indices[i] = i;
     }
-
-//    Serial.begin(9200);
 }
 
 
@@ -71,56 +84,57 @@ void shuffleArray(uint8_t* arr, size_t array_len) {
  *
  * Designed to provide a smoother transition than an all-at-once fill, like that provided by fill_solid().
  */
-void randomFill(CRGB* leds, size_t num_leds, CRGB new_color, uint16_t intra_swap_delay_us) {
+void randomFill(CRGB* leds, size_t num_leds, CRGB new_color, uint8_t num_simultaneous_swaps,
+                uint16_t intra_swap_delay_us)
+{
     shuffleArray(random_led_indices, num_leds);
 
-    for (int i=0; i<num_leds; i++) {
-        leds[random_led_indices[i]] = new_color;
-
+    size_t num_swaps_made = 0;
+    while (num_swaps_made < num_leds) {
+        for (int i=0; i<num_simultaneous_swaps && num_swaps_made<num_leds; i++) {
+            leds[random_led_indices[num_swaps_made]] = new_color;
+            num_swaps_made += 1;
+        }
         FastLED.show();
 
-        if (i < num_leds-1 && intra_swap_delay_us > 0) {
+        if (intra_swap_delay_us > 0) {
             delayMicroseconds(intra_swap_delay_us);
         }
     }
 }
 
-
+#define THETA_START 191 // start at 270 deg. around the unit circle
+#define THETA_END 63 // end at 90 deg. around the unit circle
 CRGB color_of_origin = color_sequence[0];
 CRGB destination_color = color_sequence[1];
 size_t color_sequence_index = 1;
-uint8_t theta = 191;
+uint8_t theta = THETA_START;
 
 void loop() {
-    uint8_t bias_toward_destination = sin8(theta);
-    CRGB fill_color = blend(color_of_origin, destination_color, bias_toward_destination);
-
-//    fill_solid(leds, NUM_LEDS, fill_color);
-    randomFill(leds, NUM_LEDS, fill_color, 100);
-
+    uint8_t percent_toward_destination = sin8(theta);
+    CRGB fill_color = blend(color_of_origin, destination_color, percent_toward_destination);
+    randomFill(leds, NUM_LEDS, fill_color, 1, 30);
     // randomFill() calls show() for us
-    //FastLED.show();
 
-    // TODO: Clean up this logic. Do we need to rely on the phase of FastLED's sin8?
-    // Can we use some other way to detect that we've fully transitioned from one color to another?
-    if (theta == 63) {
+    if (theta == THETA_END) {
         // We have arrived at our destination color.
         // Mark what used to be our destination as our origin, and identify our next destination.
         // TODO: Eventually, we'll want to hold onto each destination for a minute or more.
-        // Can probably get away with a call to delay(), for now. Deal with millis overflow? ehhh...
         color_of_origin = destination_color;
         color_sequence_index += 1;
-        if (color_sequence_index > 2) { // TODO: Use length of array
+        if (color_sequence_index >= color_sequence_len) {
             color_sequence_index = 0;
         }
         destination_color = color_sequence[color_sequence_index];
 
-        // TODO: Magic number
-        theta = 191;
+        theta = THETA_START;
+
+        delay(COLOR_HOLD_TIME_MS);
     } else {
-        // TODO: This relies on overflow
-        theta += 1;
+        // We have not yet arrived at our destination color.
+        // Progress toward it.
+        theta += 1; // WARNING: This relies on overflow
     }
 
-    //delay(1);
+    delay(1);
 }
