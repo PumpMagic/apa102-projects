@@ -132,6 +132,22 @@ time_t getSunsetTime(DateTime date_time) {
  * Approximate the sun's color given the current date and time
  */
 CRGB getSunColor(DateTime current_date_time) {
+  // Safe assumptions:
+  //  The sun is either set or not set.
+  //  The sun will rise or set either zero or one times per day.
+  // Counterintuitive facts:
+  //  Sunset can happen earlier on a calendar day than sunrise.
+  //  The sun can go multiple days without rising or setting.
+  //  The sun does not necessarily fully set after civil twilight.
+
+  // As a first pass, we should code against none of those counterintuitive facts.
+  // Specifically, code with these assumptions in mind:
+  //  The sun is always set at midnight.
+  //  The sun rises once a day.
+  //  The sun sets once a day, later in the day than it rose.
+  // This makes our logic a lot simpler, and lets us avoid coding around edge cases of avr-libc's time.h.
+  // The downside is that our light won't work at specific geographic locations, such as the north and south poles.
+  
   // TODO: Implement this
   //  1. Nighttime: we're in this state when the time is in the range [time.h's sunset plus delta, time.h's sunrise minus delta).
   //  2. Sunrise: when the time is in the range [time.h's sunrise minus delta, time.h's sunrise plus delta).
