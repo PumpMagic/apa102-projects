@@ -14,6 +14,9 @@
 //  TimeLord sunrise / sunset time example: https://github.com/probonopd/TimeLord/blob/master/examples/SunriseSunset/SunriseSunset.ino
 //  time.h avr history: http://swfltek.com/arduino/timelord.html
 
+// Uncomment this, unless we're running in debug mode
+#define DEBUG
+
 // Location of the observer
 // (GPS coordinates of the light we're controlling)
 #define LATITUDE 37.0
@@ -22,6 +25,7 @@
 // RTC time offset
 // TODO: Actually use this. Right now, we assume the user has programmed the RTC as UTC.
 #define UTC_OFFSET_HOURS -7
+#define SECONDS_PER_HOUR 3600
 
 // What to reset the RTC with if it's lost power
 #define RTC_RESET_YEAR    2017
@@ -33,17 +37,37 @@
 
 // LED stuff
 #define LED_TYPE APA102
-#define LED_COLOR_ORDER BGR
-#define NUM_LEDS 2
-#define DATA_PIN 4
-#define CLOCK_PIN 5
+#define LED_COLOR_ORDER RBG
+#define NUM_LEDS 1
+#define DATA_PIN 3
+#define CLOCK_PIN 13
 #define POWER_SYSTEM_VOLTAGE 5
 #define POWER_SYSTEM_MAX_CURRENT_MA 3000
+
+
+// How long we take to go from zero light to full light
+// In the real world this transition isn't a constant for every day, it varies.
+#define SUNRISE_TRANSITION_TIME_SECONDS 3600 // an hour
+#define SUNSET_TRANSITION_TIME_SECONDS SUNRISE_TRANSITION_TIME_SECONDS
+
+// TODO: FastLED's blend() probably isn't sufficient for our use.
+// We want to go from orange to white along the color spectrum, not along the RGB space.
+// Check this out: http://www.tannerhelland.com/4435/convert-temperature-rgb-algorithm-code/
+#define HORIZON_HUE 21
+#define HORIZON_SATURATION 214
+#define DAY_HUE 42
+#define DAY_SATURATION 4
+#define NIGHT_HUE 0
+#define NIGHT_SATURATION 0
+CRGB HORIZON_COLOR = CHSV(HORIZON_HUE, HORIZON_SATURATION, 255);
+CRGB DAY_COLOR = CHSV(DAY_HUE, DAY_SATURATION, 255);
+CRGB NIGHT_COLOR = CHSV(NIGHT_HUE, NIGHT_SATURATION, 0);
 
 
 // Shared data structures
 static RTC_DS3231 rtc;
 static CRGB leds[NUM_LEDS];
+static char serial_buffer[128] = "";
 
 
 void setup() {
@@ -51,6 +75,7 @@ void setup() {
   Serial.begin(9600);
   Serial.println("Hi!\n");
 
+  #ifndef DEBUG
   // Set up the RTC
   rtc.begin();
   
@@ -59,12 +84,20 @@ void setup() {
     rtc.adjust(DateTime(RTC_RESET_YEAR, RTC_RESET_MONTH, RTC_RESET_DAY,
                         RTC_RESET_HOUR, RTC_RESET_MINUTE, RTC_RESET_SECOND));
   }
+  #endif
 
   // Set up our LEDs
   FastLED.setMaxPowerInVoltsAndMilliamps(POWER_SYSTEM_VOLTAGE, POWER_SYSTEM_MAX_CURRENT_MA);
   FastLED.addLeds<LED_TYPE, DATA_PIN, CLOCK_PIN, LED_COLOR_ORDER>(leds, NUM_LEDS).setCorrection(TypicalLEDStrip);
   fill_solid(leds, NUM_LEDS, CRGB::Black);
   FastLED.show();
+
+  #ifdef DEBUG
+  CRGB test_color = CHSV(HORIZON_HUE, HORIZON_SATURATION, 128);
+  fill_solid(leds, NUM_LEDS, test_color);
+  FastLED.show();
+//  while (true) { delay(1); }
+  #endif
 
   // Set up our time library
   set_position(LATITUDE * ONE_DEGREE, LONGITUDE * ONE_DEGREE);
@@ -98,13 +131,6 @@ time_t toRoundedTimeT(DateTime date_time) {
 }
 
 /**
- * Convert a DateTime to a time_t.
- */
-time_t toTimeT(DateTime date_time) {
-  return (time_t)(date_time.secondstime());
-}
-
-/**
  * Get the sunrise time given a date.
  * 
  * The given date_time's date is important; its time is not.
@@ -129,6 +155,13 @@ time_t getSunsetTime(DateTime date_time) {
 }
 
 /**
+ * Convert a DateTime to a time_t.
+ */
+time_t toTimeT(DateTime date_time) {
+  return (time_t)(date_time.secondstime());
+}
+
+/**
  * Approximate the sun's color given the current date and time
  */
 CRGB getSunColor(DateTime current_date_time) {
@@ -147,20 +180,68 @@ CRGB getSunColor(DateTime current_date_time) {
   //  The sun sets once a day, later in the day than it rose.
   // This makes our logic a lot simpler, and lets us avoid coding around edge cases of avr-libc's time.h.
   // The downside is that our light won't work at specific geographic locations, such as the north and south poles.
+
+  TimeSpan timezone_offset = TimeSpan(UTC_OFFSET_HOURS * SECONDS_PER_HOUR);
+  // TODO: Better understand / document timezone issues. We add our timezone offset here to avoid jumping prematurely to the
+  // next day, since avr-libc's sunrise seems to only like UTC.
+  DateTime sun_time_query = current_date_time + timezone_offset;
   
-  // TODO: Implement this
-  //  1. Nighttime: we're in this state when the time is in the range [time.h's sunset plus delta, time.h's sunrise minus delta).
-  //  2. Sunrise: when the time is in the range [time.h's sunrise minus delta, time.h's sunrise plus delta).
-  //      lights are in the range (off, max daylight color) depending on the time.
-  //  3. Daytime:when the time is in the range [time.h's sunrise plus delta, time.h's sunset minus delta).
-  //  4. Sunset: lights transitioning from max daylight color to off. State in [time.h's sunset minus delta, time.h's sunset plus delta).
-  // State transitions are 1 -> 2 -> 3 -> 4. Maybe near the poles we'd need a different state machine. Assume we aren't, for simplicity.
-  // "Color", above, refers to the LEDs' hue, saturation, and value.
-  // Go from about 2000K to 5500K. Try starting with (255, 147, 41) to (255, 255, 251).
-  return CRGB::Black;
+  time_t sunrise_time = getSunriseTime(sun_time_query);
+  time_t sunset_time = getSunsetTime(sun_time_query);
+  time_t current_time = toTimeT(current_date_time);
+
+  time_t sunrise_transition_start = sunrise_time - (SUNRISE_TRANSITION_TIME_SECONDS / 2);
+  time_t sunrise_transition_end = sunrise_time + (SUNRISE_TRANSITION_TIME_SECONDS / 2);
+  time_t sunset_transition_start = sunset_time - (SUNSET_TRANSITION_TIME_SECONDS / 2);
+  time_t sunset_transition_end = sunset_time + (SUNSET_TRANSITION_TIME_SECONDS / 2);
+
+  time_t sunrise_blend_transition_step = SUNRISE_TRANSITION_TIME_SECONDS / 255;
+  time_t sunset_blend_transition_step = SUNSET_TRANSITION_TIME_SECONDS / 255;
+  
+  if (current_time < sunrise_transition_start) {
+    Serial.print("Sun's set (AM)\n");
+    return NIGHT_COLOR;
+  } else if (current_time >= sunrise_transition_start && current_time < sunrise_transition_end) {
+    // linear blend from horizon color to daytime color
+    time_t curve_position_raw = (current_time - sunrise_transition_start) / sunrise_blend_transition_step;
+    uint8_t curve_position = 0;
+    if (curve_position_raw > 255) {
+      // guard against logic errors
+      curve_position = 255;
+    } else {
+      curve_position = curve_position_raw;
+    }
+    
+    sprintf(serial_buffer, "Sun's coming out. Curve position %u", curve_position);
+    Serial.println(serial_buffer);
+    return blend(HORIZON_COLOR, DAY_COLOR, curve_position);
+  } else if (current_time >= sunrise_transition_end && current_time < sunset_transition_start) {
+    Serial.print("Sun's out\n");
+    return DAY_COLOR;
+  } else if (current_time >= sunset_transition_start && current_time < sunset_transition_end) {
+     // linear blend from daytime color to horizon color
+    time_t curve_position_raw = (current_time - sunset_transition_start) / sunset_blend_transition_step;
+    uint8_t curve_position = 0;
+    if (curve_position_raw > 255) {
+      // guard against logic errors
+      curve_position = 255;
+    } else {
+      curve_position = curve_position_raw;
+    }
+
+    Serial.print("Sun's setting\n");
+    return blend(DAY_COLOR, HORIZON_COLOR, curve_position);
+  } else if (current_time >= sunset_transition_end) {
+    Serial.print("Sun's set (PM)\n");
+    return NIGHT_COLOR;
+  }
+
+  // error scenario
+  Serial.print("Aw crap\n");
+  return NIGHT_COLOR;
 }
 
-void loop() {
+void real_loop() {
   // Get the time from the RTC
   DateTime current_time = rtc.now();
 
@@ -175,6 +256,27 @@ void loop() {
   
   // Chill for a sec
   delay(1000);
+}
+
+void fake_loop() {
+  static time_t current_time_t = 1522587600; // shortly before sunrise
+  DateTime current_time = DateTime(current_time_t);
+  
+  sprintf(serial_buffer, "It's %02u:%02u:%02u", current_time.hour(), current_time.minute(), current_time.second());
+  Serial.println(serial_buffer);
+  CRGB sun_color = getSunColor(current_time);
+  fill_solid(leds, NUM_LEDS, sun_color);
+  FastLED.show();
+  delay(1000);
+  current_time_t += 60; // a minute
+}
+
+void loop() {
+  #ifdef DEBUG
+  fake_loop();
+  #else
+  real_loop();
+  #endif
 }
 
 
