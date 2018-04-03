@@ -2,6 +2,7 @@
 #include <Wire.h>
 #include "RTClib.h"
 #include "FastLED.h"
+#include <math.h>
 
 /**
  * circadian_light: Software that controls LEDs to mimic the sun.
@@ -161,6 +162,48 @@ time_t toTimeT(DateTime date_time) {
   return (time_t)(date_time.secondstime());
 }
 
+
+// Only works from 1000K to 6600K.
+// C implementation of http://www.tannerhelland.com/4435/convert-temperature-rgb-algorithm-code/
+CRGB colorTemperatureToRGB(uint16_t temperature_kelvin) {
+    uint16_t temperature_scaled = temperature_kelvin / 100;
+
+    uint8_t red = 255;
+
+    uint8_t green = 0;
+    double green_start = log(temperature_scaled);
+    double green_raw = (99.4708025861 * green_start) - 161.1195681661;
+    if (green_raw < 0) {
+        green = 0;
+    } else if (green_raw > 255) { 
+        green = 255;
+    } else {
+        green = green_raw;
+    }
+
+    uint8_t blue = 0;
+    if (temperature_scaled <= 19) {
+        blue = 0;
+    } else {
+        double blue_start = log(temperature_scaled - 10);
+        double blue_raw = (138.5177312231 * blue_start) - 305.0447927307;
+        if (blue_raw < 0) {
+            blue = 0;
+        } else if (blue_raw > 255) {
+            blue = 255;
+        } else {
+            blue = blue_raw;
+        }
+    }
+
+
+    sprintf(serial_buffer, "RGB %u %u %u", red, green, blue);
+    Serial.println(serial_buffer);
+    return CRGB(red, green, blue);
+}
+
+
+
 /**
  * Approximate the sun's color given the current date and time
  */
@@ -194,43 +237,30 @@ CRGB getSunColor(DateTime current_date_time) {
   time_t sunrise_transition_end = sunrise_time + (SUNRISE_TRANSITION_TIME_SECONDS / 2);
   time_t sunset_transition_start = sunset_time - (SUNSET_TRANSITION_TIME_SECONDS / 2);
   time_t sunset_transition_end = sunset_time + (SUNSET_TRANSITION_TIME_SECONDS / 2);
-
-  time_t sunrise_blend_transition_step = SUNRISE_TRANSITION_TIME_SECONDS / 255;
-  time_t sunset_blend_transition_step = SUNSET_TRANSITION_TIME_SECONDS / 255;
   
   if (current_time < sunrise_transition_start) {
     Serial.print("Sun's set (AM)\n");
     return NIGHT_COLOR;
   } else if (current_time >= sunrise_transition_start && current_time < sunrise_transition_end) {
-    // linear blend from horizon color to daytime color
-    time_t curve_position_raw = (current_time - sunrise_transition_start) / sunrise_blend_transition_step;
-    uint8_t curve_position = 0;
-    if (curve_position_raw > 255) {
-      // guard against logic errors
-      curve_position = 255;
-    } else {
-      curve_position = curve_position_raw;
-    }
+    // RGB of (2000K + (seconds since transition start))
+    uint16_t temperature = 1000 + (current_time - sunrise_transition_start);
     
-    sprintf(serial_buffer, "Sun's coming out. Curve position %u", curve_position);
+    sprintf(serial_buffer, "Sun's coming out. Temperature %u", temperature);
     Serial.println(serial_buffer);
-    return blend(HORIZON_COLOR, DAY_COLOR, curve_position);
+    return colorTemperatureToRGB(temperature);
   } else if (current_time >= sunrise_transition_end && current_time < sunset_transition_start) {
-    Serial.print("Sun's out\n");
-    return DAY_COLOR;
+    uint16_t temperature = 4600;
+    sprintf(serial_buffer, "Sun's out. Temperature %u", temperature);
+    Serial.println(serial_buffer);
+    // TODO: Constant
+    return colorTemperatureToRGB(temperature);
   } else if (current_time >= sunset_transition_start && current_time < sunset_transition_end) {
-     // linear blend from daytime color to horizon color
-    time_t curve_position_raw = (current_time - sunset_transition_start) / sunset_blend_transition_step;
-    uint8_t curve_position = 0;
-    if (curve_position_raw > 255) {
-      // guard against logic errors
-      curve_position = 255;
-    } else {
-      curve_position = curve_position_raw;
-    }
+    // RGB of (5600K - (seconds since transition start))
+    uint16_t temperature = 4600 - (current_time - sunset_transition_start);
 
-    Serial.print("Sun's setting\n");
-    return blend(DAY_COLOR, HORIZON_COLOR, curve_position);
+    sprintf(serial_buffer, "Sun's setting. Temperature %u", temperature);
+    Serial.println(serial_buffer);
+    return colorTemperatureToRGB(temperature);
   } else if (current_time >= sunset_transition_end) {
     Serial.print("Sun's set (PM)\n");
     return NIGHT_COLOR;
