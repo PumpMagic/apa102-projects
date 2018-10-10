@@ -224,6 +224,11 @@ CRGB getSunColor(DateTime current_date_time) {
   // This makes our logic a lot simpler, and lets us avoid coding around edge cases of avr-libc's time.h.
   // The downside is that our light won't work at specific geographic locations, such as the north and south poles.
 
+  // TODO as of April 3: Twilight is only really orange at the horizon. Looking straight up at the sky, one just sees
+  // a white / blue brightness change. This is consistent with the explanation that the atmosphere bends certain colors.
+  // This undermines the importance of the color temperature gradient, and suggests the more relevant factor is brightness.
+  // Still: start at 2000K really dim, maybe hang out there for a few minutes, and then just adjust brightness + temperature up simultaneously.
+
   TimeSpan timezone_offset = TimeSpan(UTC_OFFSET_HOURS * SECONDS_PER_HOUR);
   // TODO: Better understand / document timezone issues. We add our timezone offset here to avoid jumping prematurely to the
   // next day, since avr-libc's sunrise seems to only like UTC.
