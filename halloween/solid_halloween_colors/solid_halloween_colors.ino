@@ -2,39 +2,21 @@
 #include "FastLED.h"
 
 
-// Light an LED strip from green -> purple -> orange in a loop, with smooth transitions, for Halloween area lighting.
-// TODO: Eventually, we'll probably need to figure out how to control multiple strips.
+// Program to light an LED strip from green -> purple -> orange in a loop, with smooth transitions, for Halloween area lighting.
+// Uses some simple fill routines built on top of FastLED.
 
 
 // LED strip specs + wiring configuration
-/**
- * Each randomFill is NUM_LEDS calls to show(); 60 calls * 2ms = 120ms
- * Each color transition is 128 steps, each step calling randomFill(); 128 * 120ms = ~15s
- *
- * Color -> color transition overhead is (FastLED.show() time) * (LED strip length / # simul. swaps) * (# fade steps)
- * 2.5ms * 60 * 128
- *
- * We could optimize this by:
- *  1. Reducing the number of times that randomFill calls show() (by switching more than one LED at a time)
- *  2. Reducing the amount of time show() takes (by using hardware SPI)
- *  3. Reducing the number of steps in a color transition (by adjusting theta by more than one at a time)
- *
- * Those optimizations are in order of preference. Hardware SPI sounds nice, until you think about how we'll need to
- * control multiple strips at some point.
- */
-#define LED_TYPE APA102
+#define LED_TYPE APA102 // (DotStar is APA102)
 #define LED_COLOR_ORDER BGR
-#define NUM_LEDS 60
+#define NUM_LEDS 180
 #define DATA_PIN 4
 #define CLOCK_PIN 5
 #define POWER_SYSTEM_VOLTAGE 5
-#define POWER_SYSTEM_MAX_CURRENT_MA 3000
+#define POWER_SYSTEM_MAX_CURRENT_MA 5000
 
 
-// LED color array
-CRGB leds[NUM_LEDS];
-
-// The colors we'll be using
+// Color configuration
 #define HALLOWEEN_ORANGE_HUE 22
 #define HALLOWEEN_PURPLE_HUE 189
 #define HALLOWEEN_GREEN_HUE 96
@@ -47,6 +29,17 @@ CRGB halloween_green = CHSV(HALLOWEEN_GREEN_HUE, HALLOWEEN_SATURATION, HALLOWEEN
 CRGB color_sequence[] = { halloween_orange, halloween_green, halloween_purple };
 size_t color_sequence_len = sizeof(color_sequence) / sizeof(color_sequence[0]);
 
+
+// Color transition algorithm configuration
+// The time it takes to transition between two of our Halloween colors depends highly on our number of LEDs,
+// SPI clock rate, and color transition algorithm.
+// These variables control our color transition algorithm. The number of LEDs and SPI clock rate are configured elsewhere.
+#define TRANSITION_SPEED_FACTOR 60 // Lower number = smoother but slower transitions. Must be between 1 and NUM_LEDS, inclusive.
+#define FADE_HOLD_US 30 // Higher number = smoother but slower transitions. Must be at least 0.
+
+
+// LED color array
+CRGB leds[NUM_LEDS];
 // Array for occasional shuffling, for use with random-swap color transitions
 uint8_t random_led_indices[NUM_LEDS];
 
@@ -80,9 +73,9 @@ void shuffleArray(uint8_t* arr, size_t array_len) {
 
 
 /**
- * Fill all colors in the given array to a new color, one random index at a time, show()ing after each swap.
+ * Fill all colors in the given array to a new color, num_simultaneous_swaps at a time, show()ing after each iteration.
  *
- * Designed to provide a smoother transition than an all-at-once fill, like that provided by fill_solid().
+ * Designed to provide a smoother transition than an all-at-once fill, like that provided by FastLED's fill_solid().
  */
 void randomFill(CRGB* leds, size_t num_leds, CRGB new_color, uint8_t num_simultaneous_swaps,
                 uint16_t intra_swap_delay_us)
@@ -91,9 +84,8 @@ void randomFill(CRGB* leds, size_t num_leds, CRGB new_color, uint8_t num_simulta
 
     size_t num_swaps_made = 0;
     while (num_swaps_made < num_leds) {
-        for (int i=0; i<num_simultaneous_swaps && num_swaps_made<num_leds; i++) {
+        for (int i=0; i<num_simultaneous_swaps && num_swaps_made<num_leds; i++, num_swaps_made++) {
             leds[random_led_indices[num_swaps_made]] = new_color;
-            num_swaps_made += 1;
         }
         FastLED.show();
 
@@ -113,13 +105,12 @@ uint8_t theta = THETA_START;
 void loop() {
     uint8_t percent_toward_destination = sin8(theta);
     CRGB fill_color = blend(color_of_origin, destination_color, percent_toward_destination);
-    randomFill(leds, NUM_LEDS, fill_color, 1, 30);
+    randomFill(leds, NUM_LEDS, fill_color, TRANSITION_SPEED_FACTOR, FADE_HOLD_US);
     // randomFill() calls show() for us
 
     if (theta == THETA_END) {
         // We have arrived at our destination color.
         // Mark what used to be our destination as our origin, and identify our next destination.
-        // TODO: Eventually, we'll want to hold onto each destination for a minute or more.
         color_of_origin = destination_color;
         color_sequence_index += 1;
         if (color_sequence_index >= color_sequence_len) {
